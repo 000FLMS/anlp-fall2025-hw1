@@ -30,7 +30,7 @@ class LayerNorm(torch.nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
         self.bias = nn.Parameter(torch.zeros(dim))
 
-    def _norm(self, x):
+    def _norm(self, x:torch.Tensor):
         """
         Compute layer normalization by subtracting the mean and dividing by 
         the standard deviation along the last dimension. Use the standard
@@ -42,8 +42,10 @@ class LayerNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        # todo
-        raise NotImplementedError
+        mean = torch.mean(x)
+        # False for population variance
+        variance = torch.var(x, unbiased=False)
+        return (x - mean) / torch.sqrt(variance + self.eps)
 
     def forward(self, x):
         """
@@ -67,6 +69,7 @@ class Attention(nn.Module):
         assert config.n_heads % self.n_kv_heads == 0
         model_parallel_size = 1
         self.n_local_heads = config.n_heads // model_parallel_size
+        # For GQA, each kv head has n_rep queries
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = config.dim // config.n_heads
@@ -93,8 +96,11 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-        # todo
-        raise NotImplementedError
+
+        attention = torch.softmax(query @ key.transpose(-1, -2) / torch.sqrt(key.size(-1)), dim=-1)
+        attention = self.attn_dropout(attention)
+        attention = attention @ value
+        return attention
 
     def forward(
         self,
@@ -196,8 +202,12 @@ class LlamaLayer(nn.Module):
         5) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
-        # todo
-        raise NotImplementedError
+        norm_embed = self.attention_norm(x)
+        attention = self.attention(norm_embed)
+        residual = attention + x
+        norm_attn = self.ffn_norm(residual)
+        ffn = self.feed_forward(norm_attn)
+        return ffn + residual
 
 class Llama(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
