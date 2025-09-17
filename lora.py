@@ -47,8 +47,10 @@ class LoRALayer(nn.Module):
         Returns:
             Output tensor of shape (batch, seq, out_features)
         """
-        # todo
-        raise NotImplementedError
+        original_output = self.original_layer(x)
+        lora_output = self.scaling * self.lora_B @ (self.lora_A @ x )
+
+        return original_output + lora_output
 
 
 
