@@ -33,9 +33,9 @@ class AdamW(Optimizer):
 
         for group in self.param_groups:
 
-            # TODO: Clip gradients if max_grad_norm is set
+            # Clip gradients if max_grad_norm is set
             if group['max_grad_norm'] is not None:
-                raise NotImplementedError()
+                torch.nn.utils.clip_grad.clip_grad_norm_(group["params"], group['max_grad_norm'])
             
             for p in group["params"]:
                 if p.grad is None:
@@ -44,23 +44,47 @@ class AdamW(Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError("Adam does not support sparse gradients, please consider SparseAdam instead")
 
-                raise NotImplementedError()
 
                 # State should be stored in this dictionary
                 state = self.state[p]
 
-                # TODO: Access hyperparameters from the `group` dictionary
+                # Access hyperparameters from the `group` dictionary
                 alpha = group["lr"]
+                betas = group["betas"]
+                eps = group["eps"]
+                weight_decay = group["weight_decay"]
+                correct_bias = group["correct_bias"]
 
-                # TODO: Update first and second moments of the gradients
+                # Update first and second moments of the gradients
+                if len(state) == 0:
+                    # Init two momentums to 0
+                    state["mt"] = torch.zeros_like(grad)
+                    state["vt"] = torch.zeros_like(grad)
+                    state["step"] = 0
 
-                # TODO: Bias correction
+                state["step"] += 1
+                
+                mt = state["mt"]
+                vt = state["vt"]
+                
+                mt.mul_(betas[0]).add_(grad * (1 - betas[0]))
+                vt.mul_(betas[1]).add_((1 - betas[1]) * (grad ** 2))
+                
+                lr = alpha
+
+                # Bias correction
                 # Please note that we are using the "efficient version" given in Algorithm 2 
                 # https://arxiv.org/pdf/1711.05101
+                if correct_bias:
+                    lr = lr * ((1 - betas[1] ** state['step']) ** 0.5 / (1 - betas[0] ** state['step']))
+                    
 
-                # TODO: Update parameters
+                # Update parameters
+                delta = -lr * mt / (torch.sqrt(vt) + eps)
+                p.data.add_(delta)
 
-                # TODO: Add weight decay after the main gradient-based updates.
+                #  Add weight decay after the main gradient-based updates.
                 # Please note that the learning rate should be incorporated into this update.
-
+                p.data.add_(-alpha * weight_decay * p.data)
+                 
         return loss
