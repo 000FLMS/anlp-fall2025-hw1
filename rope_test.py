@@ -30,7 +30,8 @@ def test_apply_rotary_emb() -> tuple[torch.Tensor, torch.Tensor]:
 
 actual_query_rope_embedding, actual_key_rope_embedding = test_apply_rotary_emb()
 ref_query_rope_embedding, ref_key_rope_embedding = torch.load("./rotary_embedding_actual.data")
-
+print(ref_query_rope_embedding)
+print(actual_query_rope_embedding)
 assert torch.allclose(ref_query_rope_embedding, actual_query_rope_embedding)
 assert torch.allclose(ref_key_rope_embedding, actual_key_rope_embedding)
 print("Rotary embedding test passed!")
