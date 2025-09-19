@@ -25,6 +25,7 @@ class LoRALayer(nn.Module):
         self.lora_A = nn.Parameter(torch.randn(rank, original_layer.in_features) * 0.02)
         self.lora_B = nn.Parameter(torch.zeros(original_layer.out_features, rank))
         
+        
         # Freeze original parameters
         for param in self.original_layer.parameters():
             param.requires_grad = False
@@ -48,9 +49,8 @@ class LoRALayer(nn.Module):
             Output tensor of shape (batch, seq, out_features)
         """
         original_output = self.original_layer(x)
-        lora_output = self.scaling * self.lora_B @ (self.lora_A @ x )
-
-        return original_output + lora_output
+        lora_output = self.scaling * self.lora_B @ (self.lora_A @ x.transpose(-1,-2))
+        return original_output + lora_output.transpose(-1,-2)
 
 
 
