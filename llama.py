@@ -42,10 +42,10 @@ class LayerNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        mean = torch.mean(x)
+        mean = torch.mean(x, dim=-1, keepdim=True)
         # False for population variance
-        variance = torch.var(x, unbiased=False)
-        return (x - mean) / torch.sqrt(variance + self.eps)
+        variance = torch.var(x, dim=-1, keepdim=True, unbiased=False)
+        return (x - mean) / (torch.sqrt(variance + self.eps) )
 
     def forward(self, x):
         """
@@ -97,7 +97,7 @@ class Attention(nn.Module):
         attention matrix before applying it to the value tensor.
         '''
 
-        attention = torch.softmax(query @ key.transpose(-1, -2) / torch.sqrt(key.size(-1)), dim=-1)
+        attention = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
         attention = self.attn_dropout(attention)
         attention = attention @ value
         return attention
@@ -162,7 +162,7 @@ class FeedForward(nn.Module):
     def SwiGLU(self, x: torch.Tensor) -> torch.Tensor:
         '''
         Compute the SwiGLU activation function (see Section 2 in
-        https://arxiv.org/abs/2204.02311
+        https://arxiv.or/abs/2204.02311
         '''
         return F.silu(self.w1(x)) * self.w3(x)
 
@@ -283,12 +283,10 @@ class Llama(LlamaPreTrainedModel):
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] # crop to just the final time step
-            # todo
-            raise NotImplementedError
             
             if temperature == 0.0:
                 # select the single most likely index
-                idx_next = None
+                idx_next = logits.argmax(dim=-1, keepdim=True)
             else:
                 '''
                 Perform temperature sampling with epsilon sampling:
@@ -298,7 +296,11 @@ class Llama(LlamaPreTrainedModel):
                 4) Renormalize the filtered probabilities so they sum to 1.
                 5) Sample from this filtered probability distribution.
                 '''
-                idx_next = None
+                logits = torch.softmax(logits, dim=-1)
+                mask = logits >= epsilon
+                logits = logits * mask
+                logits = logits / logits.sum(dim=-1, keepdim=True)
+                idx_next = torch.multinomial(logits, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
         
