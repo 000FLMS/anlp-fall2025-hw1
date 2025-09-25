@@ -465,5 +465,10 @@ if __name__ == "__main__":
 		# Step 6
 		# Evaluate your LoRA model on the dev and test sets
 		test(args)
+	elif args.option == "diff":
+		train(args)
+
+		test(args)
+
 	else:
 		raise ValueError(f"Invalid option: {args.option}")

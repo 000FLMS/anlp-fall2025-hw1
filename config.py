@@ -195,6 +195,7 @@ class LlamaConfig(PretrainedConfig):
     hidden_dim: Optional[int] = None,
     position_embedding_type: str = "rotary",
     use_cache: bool = True,
+    attention_type: str = 'attention',
     **kwargs
   ):
     super().__init__(**kwargs)
@@ -211,3 +212,4 @@ class LlamaConfig(PretrainedConfig):
     self.hidden_dim = hidden_dim
     self.position_embedding_type = position_embedding_type
     self.use_cache = use_cache
+    self.attention_type = attention_type

@@ -74,6 +74,8 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = config.dim // config.n_heads
         self.max_seq_len = config.max_seq_len
+        self.n_heads = config.n_heads
+        
         self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
         self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -81,6 +83,29 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
+        self.diff = False
+        self.value_dim = self.head_dim
+        if config.attention_type == 'diff_attn':
+            self.diff = True
+            self.lambda_q1 =  nn.Parameter(torch.ones(self.head_dim))
+            self.lambda_q2 =  nn.Parameter(torch.ones(self.head_dim))
+            self.lambda_k1 =  nn.Parameter(torch.ones(self.head_dim))
+            self.lambda_k2 =  nn.Parameter(torch.ones(self.head_dim))
+            self.lambda_init = 0.8
+            self.diff_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim * 2, bias=False)
+            self.diff_output = nn.Linear(config.n_heads * self.head_dim * 2, config.dim, bias=False)
+            self.value_dim = self.head_dim * 2
+    @torch.no_grad()
+    def change_to_diff(self):
+        Wv = self.compute_value.weight   
+        self.diff_value.weight[:self.n_kv_heads * self.head_dim].copy_(Wv / 2)
+        self.diff_value.weight[self.n_kv_heads * self.head_dim:].copy_(Wv / 2)
+
+        Wo = self.compute_output.weight   
+        self.diff_output.weight[:, :self.n_heads * self.head_dim].copy_(Wo / 2)
+        self.diff_output.weight[:, self.n_heads * self.head_dim:].copy_(Wo / 2)
+        self.compute_value = self.diff_value
+        self.compute_output = self.diff_output
 
     def compute_query_key_value_scores(self,
                                        query: torch.Tensor,
@@ -96,11 +121,21 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-
-        attention = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
-        attention = self.attn_dropout(attention)
-        attention = attention @ value
-        return attention
+        if self.diff:
+            _lambda = torch.exp(self.lambda_q1 @ self.lambda_k1) - torch.exp(self.lambda_q2 @ self.lambda_k2) + self.lambda_init
+            query_2 = query.clone()
+            key_2 = key.clone()
+            score_1 = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
+            score_2 = torch.softmax(query_2 @ key_2.transpose(-1, -2) / (key_2.size(-1) ** (0.5)), dim=-1)
+            attention = score_1 - _lambda * score_2
+            attention = self.attn_dropout(attention)
+            output = attention @ value
+            output = output * (1 - self.lambda_init)
+        else:
+            attention = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
+            attention = self.attn_dropout(attention)
+            output = attention @ value
+        return output
 
     def forward(
         self,
@@ -122,7 +157,7 @@ class Attention(nn.Module):
         value = self.compute_value(x)
         query = query.view(batch_size, seqlen, self.n_local_heads, self.head_dim)
         key = key.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
-        value = value.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
+        value = value.view(batch_size, seqlen, self.n_local_kv_heads, self.value_dim)
 
         # RoPE relative positional embeddings
         query, key = apply_rotary_emb(query, key, self.head_dim, self.max_seq_len)
@@ -247,6 +282,9 @@ class Llama(LlamaPreTrainedModel):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    def change_diff_attn(self):
+        for layer in self.layers:
+            layer.attention.change_to_diff()
 
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
         _batch_size, seqlen = tokens.shape
@@ -306,7 +344,7 @@ class Llama(LlamaPreTrainedModel):
         
         return idx
 
-def load_pretrained(checkpoint):
+def load_pretrained(checkpoint, is_diff=False):
   device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
   #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
   dtype = "float32"
@@ -320,6 +358,7 @@ def load_pretrained(checkpoint):
   # init from a model saved in a specific directory
   checkpoint_dict = torch.load(checkpoint, map_location=device)
   config = LlamaConfig(**checkpoint_dict['model_args'])
+  config.attention_type = 'diff_attn'
   model = Llama(config)
   state_dict = checkpoint_dict['model']
   unwanted_prefix = '_orig_mod.'
@@ -327,4 +366,5 @@ def load_pretrained(checkpoint):
       if k.startswith(unwanted_prefix):
           state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
   model.load_state_dict(state_dict, strict=False)
+  model.change_diff_attn()
   return model
