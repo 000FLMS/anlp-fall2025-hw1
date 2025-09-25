@@ -61,6 +61,106 @@ class LayerNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight + self.bias
     
+class DiffAttention(nn.Module):
+    def __init__(self, config: LlamaConfig):
+        super().__init__()
+        self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
+        assert config.n_heads % self.n_kv_heads == 0
+        model_parallel_size = 1
+        self.n_local_heads = config.n_heads // model_parallel_size
+        # For GQA, each kv head has n_rep queries
+        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.head_dim = config.dim // config.n_heads
+        self.max_seq_len = config.max_seq_len
+        self.n_heads = config.n_heads
+        
+        self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
+        self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.dropout = config.dropout
+        self.value_dim = self.head_dim * 2
+        self.lambda_q1 =  nn.Parameter(torch.ones(self.head_dim))
+        self.lambda_q2 =  nn.Parameter(torch.ones(self.head_dim))
+        self.lambda_k1 =  nn.Parameter(torch.ones(self.head_dim))
+        self.lambda_k2 =  nn.Parameter(torch.ones(self.head_dim))
+        self.lambda_init = 0.8
+        self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.value_dim, bias=False)
+        self.compute_output = nn.Linear(config.n_heads * self.value_dim, config.dim, bias=False)
+        
+
+
+    def compute_query_key_value_scores(self,
+                                       query: torch.Tensor,
+                                       key: torch.Tensor,
+                                       value: torch.Tensor) -> torch.Tensor:
+        '''
+        Jointly compute Scaled Dot Product Attention (see Section 3.2.1 in
+        https://arxiv.org/abs/1706.03762 for details). The query, key, and
+        value tensors each have shape (bs, n_local_heads, seqlen, head_dim).
+        An optimal implemention will jointly computing attention for multiple
+        heads (n_local_heads of them) at once using matrix/tensor operations.
+
+        Make sure to use attention_dropout (self.attn_dropout) on the computed
+        attention matrix before applying it to the value tensor.
+        '''
+        _lambda = torch.exp(self.lambda_q1 @ self.lambda_k1) - torch.exp(self.lambda_q2 @ self.lambda_k2) + self.lambda_init
+        query_2 = query.clone()
+        key_2 = key.clone()
+        score_1 = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
+        score_2 = torch.softmax(query_2 @ key_2.transpose(-1, -2) / (key_2.size(-1) ** (0.5)), dim=-1)
+        attention = score_1 - _lambda * score_2
+        attention = self.attn_dropout(attention)
+        output = attention @ value
+        output = output * (1 - self.lambda_init)
+
+        return output
+
+    def forward(
+        self,
+        x: torch.Tensor
+    ):
+        '''
+        Llama2 uses Grouped-Query Attention. The details of GQA are actually
+        not critical to solving this assignment; you are simply asked to
+        compute Scaled Dot Product Attention (see above for details). GQA is
+        a memory optimization to compute multi-head attention efficiently. See
+        Section 2.2 in https://arxiv.org/abs/2305.13245 or
+        https://ai.plainenglish.io/understanding-llama2-kv-cache-grouped-query-attention-rotary-embedding-and-more-c17e5f49a6d7
+        for details.
+        '''
+        batch_size, seqlen, _ = x.shape
+
+        query = self.compute_query(x)
+        key = self.compute_key(x)
+        value = self.compute_value(x)
+        query = query.view(batch_size, seqlen, self.n_local_heads, self.head_dim)
+        key = key.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
+        value = value.view(batch_size, seqlen, self.n_local_kv_heads, self.value_dim)
+
+        # RoPE relative positional embeddings
+        query, key = apply_rotary_emb(query, key, self.head_dim, self.max_seq_len)
+
+        # Grouped multiquery attention: expand out keys and values.
+        # Convert both to:
+        # (bs, seqlen, n_local_heads, head_dim)
+        key = torch.repeat_interleave(key, dim=2, repeats=self.n_rep)
+        value = torch.repeat_interleave(value, dim=2, repeats=self.n_rep)
+
+        # make heads into a batch dimension
+        query = query.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        output = self.compute_query_key_value_scores(query, key, value)
+
+        # restore time as batch dimension and concat heads
+        output = output.transpose(1, 2).contiguous().view(batch_size, seqlen, -1)
+
+        # final projection into the residual stream
+        output = self.resid_dropout(self.compute_output(output))
+        return output
+
 
 class Attention(nn.Module):
     def __init__(self, config: LlamaConfig):
@@ -83,30 +183,7 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
-        self.diff = False
-        self.value_dim = self.head_dim
-        if config.attention_type == 'diff_attn':
-            self.diff = True
-            self.lambda_q1 =  nn.Parameter(torch.ones(self.head_dim))
-            self.lambda_q2 =  nn.Parameter(torch.ones(self.head_dim))
-            self.lambda_k1 =  nn.Parameter(torch.ones(self.head_dim))
-            self.lambda_k2 =  nn.Parameter(torch.ones(self.head_dim))
-            self.lambda_init = 0.8
-            self.diff_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim * 2, bias=False)
-            self.diff_output = nn.Linear(config.n_heads * self.head_dim * 2, config.dim, bias=False)
-            self.value_dim = self.head_dim * 2
-    @torch.no_grad()
-    def change_to_diff(self):
-        Wv = self.compute_value.weight   
-        self.diff_value.weight[:self.n_kv_heads * self.head_dim].copy_(Wv / 2)
-        self.diff_value.weight[self.n_kv_heads * self.head_dim:].copy_(Wv / 2)
-
-        Wo = self.compute_output.weight   
-        self.diff_output.weight[:, :self.n_heads * self.head_dim].copy_(Wo / 2)
-        self.diff_output.weight[:, self.n_heads * self.head_dim:].copy_(Wo / 2)
-        self.compute_value = self.diff_value
-        self.compute_output = self.diff_output
-
+    
     def compute_query_key_value_scores(self,
                                        query: torch.Tensor,
                                        key: torch.Tensor,
@@ -121,20 +198,10 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-        if self.diff:
-            _lambda = torch.exp(self.lambda_q1 @ self.lambda_k1) - torch.exp(self.lambda_q2 @ self.lambda_k2) + self.lambda_init
-            query_2 = query.clone()
-            key_2 = key.clone()
-            score_1 = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
-            score_2 = torch.softmax(query_2 @ key_2.transpose(-1, -2) / (key_2.size(-1) ** (0.5)), dim=-1)
-            attention = score_1 - _lambda * score_2
-            attention = self.attn_dropout(attention)
-            output = attention @ value
-            output = output * (1 - self.lambda_init)
-        else:
-            attention = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
-            attention = self.attn_dropout(attention)
-            output = attention @ value
+        
+        attention = torch.softmax(query @ key.transpose(-1, -2) / (key.size(-1) ** (0.5)), dim=-1)
+        attention = self.attn_dropout(attention)
+        output = attention @ value
         return output
 
     def forward(
@@ -366,5 +433,4 @@ def load_pretrained(checkpoint, is_diff=False):
       if k.startswith(unwanted_prefix):
           state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
   model.load_state_dict(state_dict, strict=False)
-  model.change_diff_attn()
   return model
