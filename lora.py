@@ -3,6 +3,65 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class MixOutLayer(nn.Module):
+    """MixOut layer for linear transformations."""
+    def __init__(self, original_layer, p = 0.8):
+        super().__init__()
+        
+        self.original_weight = original_layer.weight.data
+        self.weight = nn.Parameter(self.original_weight)
+        
+        if original_layer.bias is not None:
+            self.original_bias =  original_layer.bias.data
+            self.bias = nn.Parameter(self.original_bias)
+        else:
+            self.bias = None
+        self.p = p
+    def mixout(self, W, W_o):
+        if not self.training or self.p == 1.0:
+            return W
+        # Mixout: W_t = M * W + (1 - M) W_O (M ~ bernoulli(p))
+        mask = torch.bernoulli(torch.full_like(W, self.p))
+        mix = mask * W + (1 - mask) * W_o
+        return mix
+    def forward(self, x):
+        w = self.mixout(self.weight, self.original_weight)
+        if self.bias is not None:
+            b = self.mixout(self. bias, self.original_bias)
+        else:
+            b = None
+        return F.linear(x, w, b)
+
+def apply_mixout(model, p = 0.9):
+    modules_replaced = 0
+    
+    def apply_mixout_recursive(parent_module, module_name=""):
+        nonlocal modules_replaced
+        
+        for name, child_module in parent_module.named_children():
+            full_name = f"{module_name}.{name}" if module_name else name
+            
+            # Check if this module should be replaced
+            if isinstance(child_module, nn.Linear):
+                mixout = MixOutLayer(child_module, p)
+                setattr(parent_module, name, mixout)
+                modules_replaced += 1
+                print(f"Applied Mixout to {full_name}")
+            else:
+                # Recursively apply to child modules
+                apply_mixout_recursive(child_module, full_name)
+
+    def disable_dropout(model):
+        for module in model.modules():
+            if isinstance(module, nn.Dropout):
+                module.p = 0.0
+        return model
+    disable_dropout(model)
+    apply_mixout_recursive(model)
+
+    return model
+
+
 class LoRALayer(nn.Module):
     """LoRA layer for linear transformations."""
     

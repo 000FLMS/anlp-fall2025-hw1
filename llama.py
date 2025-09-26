@@ -224,7 +224,7 @@ class Attention(nn.Module):
         value = self.compute_value(x)
         query = query.view(batch_size, seqlen, self.n_local_heads, self.head_dim)
         key = key.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
-        value = value.view(batch_size, seqlen, self.n_local_kv_heads, self.value_dim)
+        value = value.view(batch_size, seqlen, self.n_local_kv_heads, self.head_dim)
 
         # RoPE relative positional embeddings
         query, key = apply_rotary_emb(query, key, self.head_dim, self.max_seq_len)

@@ -15,7 +15,7 @@ from optimizer import AdamW
 from tokenizer import Tokenizer
 from tqdm import tqdm
 from typing import Optional
-from lora import apply_lora, count_lora_parameters, get_lora_optimizer_params, merge_lora_weights
+from lora import apply_lora, count_lora_parameters, get_lora_optimizer_params, merge_lora_weights, apply_mixout
 
 
 TQDM_DISABLE=False
@@ -295,6 +295,80 @@ def train_lora(args):
 
 		print(f"LoRA epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
+def train_mixout(args):
+	"""Train with LoRA fine-tuning."""
+	device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+	
+	#### Load data
+	tokenizer = Tokenizer(args.max_sentence_len)
+	train_data, num_labels = create_data(args.train, tokenizer, 'train')
+	dev_data = create_data(args.dev, tokenizer, 'valid')
+
+	train_dataset = LlamaDataset(train_data, args)
+	dev_dataset = LlamaDataset(dev_data, args)
+
+	train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch_size,
+								  collate_fn=train_dataset.collate_fn)
+	dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size,
+								collate_fn=dev_dataset.collate_fn)
+
+	#### Init model with LoRA
+	config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+			  'pretrained_model_path': args.pretrained_model_path,
+			  'num_labels': num_labels,
+			  'data_dir': '.',
+			  'option': 'finetune'}  # Set to finetune so LoRA params can be trained
+
+	config = SimpleNamespace(**config)
+
+	# initialize the Sentence Classification Model
+	model = LlamaEmbeddingClassifier(config)
+	
+	# Apply Mixout to the pretrained weights
+	print(f"Applying Mixout with p={args.mixout_p}")
+	model.llama = apply_mixout(model.llama, p=0.9)
+	
+	
+	model = model.to(device)
+	
+	lr = args.lr
+	optimizer = AdamW(model.parameters(), lr=lr)
+	best_dev_acc = 0
+
+	## run for the specified number of epochs
+	for epoch in tqdm(range(args.epochs)):
+		model.train()
+		train_loss = 0
+		num_batches = 0
+		for step, batch in enumerate(tqdm(train_dataloader, desc=f'mixout-train-{epoch}', disable=TQDM_DISABLE)):
+			b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
+
+			b_ids = b_ids.to(device)
+			b_labels = b_labels.to(device)
+
+			optimizer.zero_grad()
+			logits = model(b_ids)
+			loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+
+			loss.backward()
+			optimizer.step()
+
+			train_loss += loss.item()
+			num_batches += 1
+
+		train_loss = train_loss / (num_batches)
+
+		train_acc, _, _, _, _ = model_eval(train_dataloader, model, device)
+		dev_acc, _, _, _, _ = model_eval(dev_dataloader, model, device)
+
+		if dev_acc > best_dev_acc:
+			best_dev_acc = dev_acc
+			save_lora_model(model, optimizer, args, config, args.filepath)
+
+		print(f"Mixout epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+
+
+
 def generate_sentence(args, prefix, outfile, max_new_tokens = 75, temperature = 0.0):
 	with torch.no_grad():
 		device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -414,7 +488,7 @@ def get_args():
 	parser.add_argument("--epochs", type=int, default=5)
 	parser.add_argument("--option", type=str,
 						help='prompt: the Llama parameters are frozen; finetune: Llama parameters are updated',
-						choices=('generate', 'prompt', 'finetune', 'lora'), default="generate")
+						choices=('generate', 'prompt', 'finetune', 'lora', 'mixout'), default="generate")
 	parser.add_argument("--use_gpu", action='store_true')
 	parser.add_argument("--generated_sentence_low_temp_out", type=str, default="generated-sentence-temp-0.txt")
 	parser.add_argument("--generated_sentence_high_temp_out", type=str, default="generated-sentence-temp-1.txt")
@@ -422,6 +496,8 @@ def get_args():
 	parser.add_argument("--test_out", type=str, default="cfimdb-test-prompting-output.txt")
 	parser.add_argument("--lora_rank", type=int, default=4, help="LoRA rank (r)")
 	parser.add_argument("--lora_alpha", type=float, default=1.0, help="LoRA alpha scaling factor")
+	parser.add_argument("--mixout_p", type=float, default=0.9, help="Mixout bernoulli prob")
+	
 
 	# hyper parameters
 	parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
@@ -465,8 +541,9 @@ if __name__ == "__main__":
 		# Step 6
 		# Evaluate your LoRA model on the dev and test sets
 		test(args)
-	elif args.option == "diff":
-		train(args)
+	elif args.option == "mixout":
+		# Finetue with mixout
+		train_mixout(args)
 
 		test(args)
 
