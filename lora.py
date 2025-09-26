@@ -8,11 +8,11 @@ class MixOutLayer(nn.Module):
     def __init__(self, original_layer, p = 0.8):
         super().__init__()
         
-        self.original_weight = original_layer.weight.data
+        self.register_buffer("original_weight", original_layer.weight.data)
         self.weight = nn.Parameter(self.original_weight)
         
         if original_layer.bias is not None:
-            self.original_bias =  original_layer.bias.data
+            self.register_buffer("original_bias", original_layer.bias.data)
             self.bias = nn.Parameter(self.original_bias)
         else:
             self.bias = None

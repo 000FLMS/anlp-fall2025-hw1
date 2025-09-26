@@ -340,7 +340,7 @@ def train_mixout(args):
 		model.train()
 		train_loss = 0
 		num_batches = 0
-		for step, batch in enumerate(tqdm(train_dataloader, desc=f'mixout-train-{epoch}', disable=TQDM_DISABLE)):
+		for step, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
 			b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
 
 			b_ids = b_ids.to(device)
@@ -348,7 +348,7 @@ def train_mixout(args):
 
 			optimizer.zero_grad()
 			logits = model(b_ids)
-			loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+			loss = F.nll_loss(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
 			loss.backward()
 			optimizer.step()
@@ -358,12 +358,12 @@ def train_mixout(args):
 
 		train_loss = train_loss / (num_batches)
 
-		train_acc, _, _, _, _ = model_eval(train_dataloader, model, device)
-		dev_acc, _, _, _, _ = model_eval(dev_dataloader, model, device)
+		train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
+		dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
 
 		if dev_acc > best_dev_acc:
 			best_dev_acc = dev_acc
-			save_lora_model(model, optimizer, args, config, args.filepath)
+			save_model(model, optimizer, args, config, args.filepath)
 
 		print(f"Mixout epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
