@@ -15,7 +15,7 @@ from optimizer import AdamW
 from tokenizer import Tokenizer
 from tqdm import tqdm
 from typing import Optional
-from lora import apply_lora, count_lora_parameters, get_lora_optimizer_params, merge_lora_weights, apply_mixout
+from lora import apply_lora, count_lora_parameters, get_lora_optimizer_params, merge_lora_weights, apply_mixout, merge_mixout_weights
 
 
 TQDM_DISABLE=False
@@ -148,6 +148,22 @@ def save_lora_model(model, optimizer, args, config, filepath, merge_weights=True
         save_model(model, optimizer, args, config, filepath)
         print(f"Saved LoRA model to {filepath}")
 
+def save_mixout_model(model, optimizer, args, config, filepath, merge_weights=True):
+    """
+    Save mixout model with option to merge weights back to standard format.
+    """
+    if merge_weights:
+        print("Merging mixout weights back into original model...")
+        
+        merged_model = copy.deepcopy(model)
+        merged_model = merge_mixout_weights(merged_model)
+        
+        # Save the merged model (now it's a standard model)
+        save_model(merged_model, optimizer, args, config, filepath)
+        print(f"Saved merged model to {filepath}")
+    else:
+        save_model(model, optimizer, args, config, filepath)
+        print(f"Saved mixout model to {filepath}")
 
 def train(args):
 	device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -312,13 +328,13 @@ def train_mixout(args):
 	dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size,
 								collate_fn=dev_dataset.collate_fn)
 
-	#### Init model with LoRA
+	#### Init model
 	config = {'hidden_dropout_prob': args.hidden_dropout_prob,
 			  'pretrained_model_path': args.pretrained_model_path,
 			  'num_labels': num_labels,
 			  'data_dir': '.',
-			  'option': 'finetune'}  # Set to finetune so LoRA params can be trained
-
+			  'option': args.option}
+	
 	config = SimpleNamespace(**config)
 
 	# initialize the Sentence Classification Model
@@ -335,37 +351,37 @@ def train_mixout(args):
 	optimizer = AdamW(model.parameters(), lr=lr)
 	best_dev_acc = 0
 
-	## run for the specified number of epochs
-	for epoch in tqdm(range(args.epochs)):
-		model.train()
-		train_loss = 0
-		num_batches = 0
-		for step, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
-			b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
+	# ## run for the specified number of epochs
+	# for epoch in tqdm(range(args.epochs)):
+	# 	model.train()
+	# 	train_loss = 0
+	# 	num_batches = 0
+	# 	for step, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
+	# 		b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
 
-			b_ids = b_ids.to(device)
-			b_labels = b_labels.to(device)
+	# 		b_ids = b_ids.to(device)
+	# 		b_labels = b_labels.to(device)
 
-			optimizer.zero_grad()
-			logits = model(b_ids)
-			loss = F.nll_loss(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+	# 		optimizer.zero_grad()
+	# 		logits = model(b_ids)
+	# 		loss = F.nll_loss(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
-			loss.backward()
-			optimizer.step()
+	# 		loss.backward()
+	# 		optimizer.step()
 
-			train_loss += loss.item()
-			num_batches += 1
+	# 		train_loss += loss.item()
+	# 		num_batches += 1
 
-		train_loss = train_loss / (num_batches)
+	# 	train_loss = train_loss / (num_batches)
 
-		train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
-		dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
+	# 	train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
+	# 	dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
 
-		if dev_acc > best_dev_acc:
-			best_dev_acc = dev_acc
-			save_model(model, optimizer, args, config, args.filepath)
+	# 	if dev_acc > best_dev_acc:
+	# 		best_dev_acc = dev_acc
+	save_mixout_model(model, optimizer, args, config, args.filepath)
 
-		print(f"Mixout epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+	# print(f"Mixout epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 
 
@@ -445,14 +461,14 @@ def test_with_prompting(args):
 		write_predictions_to_file("test", args.test_out, test_acc, test_pred, test_sents)
 
 def test(args):
-    assert args.dev_out.endswith("dev-finetuning-output.txt") or args.dev_out.endswith("dev-lora-output.txt"), \
+    assert args.dev_out.endswith("dev-finetuning-output.txt") or args.dev_out.endswith("dev-lora-output.txt") or args.dev_out.endswith("dev-mixout-output.txt"), \
         'For saving results, please set the dev_out argument as "<dataset>-dev-finetuning-output.txt" or "<dataset>-dev-lora-output.txt"'
-    assert args.test_out.endswith("test-finetuning-output.txt") or args.test_out.endswith("test-lora-output.txt"), \
+    assert args.test_out.endswith("test-finetuning-output.txt") or args.test_out.endswith("test-lora-output.txt") or  args.dev_out.endswith("dev-mixout-output.txt"), \
         'For saving results, please set the test_out argument as "<dataset>-test-finetuning-output.txt" or "<dataset>-test-lora-output.txt"'
     
     with torch.no_grad():
         device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-        saved = torch.load(args.filepath)
+        saved = torch.load(args.filepath, weights_only=False)
         config = saved['model_config']
         model = LlamaEmbeddingClassifier(config)
         model.load_state_dict(saved['model'])

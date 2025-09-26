@@ -7,7 +7,7 @@ class MixOutLayer(nn.Module):
     """MixOut layer for linear transformations."""
     def __init__(self, original_layer, p = 0.8):
         super().__init__()
-        
+        self.original_layer = original_layer
         self.register_buffer("original_weight", original_layer.weight.data)
         self.weight = nn.Parameter(self.original_weight)
         
@@ -61,6 +61,34 @@ def apply_mixout(model, p = 0.9):
 
     return model
 
+def merge_mixout_weights(model):
+    """
+    Merge mixout weights back into the original linear layers.
+    This creates a standard model without mixout structure.
+    """
+    def merge_mixout_recursive(module):
+        for name, child_module in module.named_children():
+            if isinstance(child_module, MixOutLayer):
+                # Calculate the merged weight: W_original + (B @ A) * scaling
+                mixout_weight = child_module.weight
+                
+                # Create new linear layer with merged weights
+                merged_layer = nn.Linear(
+                    child_module.original_layer.in_features,
+                    child_module.original_layer.out_features,
+                    bias=child_module.bias is not None
+                )
+                merged_layer.weight.data = mixout_weight
+                if child_module.bias is not None:
+                    merged_layer.bias.data = child_module.bias.data
+                
+                # Replace the LoRA layer with merged layer
+                setattr(module, name, merged_layer)
+            else:
+                merge_mixout_recursive(child_module)
+    
+    merge_mixout_recursive(model)
+    return model
 
 class LoRALayer(nn.Module):
     """LoRA layer for linear transformations."""
