@@ -351,37 +351,37 @@ def train_mixout(args):
 	optimizer = AdamW(model.parameters(), lr=lr)
 	best_dev_acc = 0
 
-	# ## run for the specified number of epochs
-	# for epoch in tqdm(range(args.epochs)):
-	# 	model.train()
-	# 	train_loss = 0
-	# 	num_batches = 0
-	# 	for step, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
-	# 		b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
+	## run for the specified number of epochs
+	for epoch in tqdm(range(args.epochs)):
+		model.train()
+		train_loss = 0
+		num_batches = 0
+		for step, batch in enumerate(tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
+			b_ids, b_labels, b_sents = batch['token_ids'], batch['labels'], batch['sents']
 
-	# 		b_ids = b_ids.to(device)
-	# 		b_labels = b_labels.to(device)
+			b_ids = b_ids.to(device)
+			b_labels = b_labels.to(device)
 
-	# 		optimizer.zero_grad()
-	# 		logits = model(b_ids)
-	# 		loss = F.nll_loss(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+			optimizer.zero_grad()
+			logits = model(b_ids)
+			loss = F.nll_loss(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
-	# 		loss.backward()
-	# 		optimizer.step()
+			loss.backward()
+			optimizer.step()
 
-	# 		train_loss += loss.item()
-	# 		num_batches += 1
+			train_loss += loss.item()
+			num_batches += 1
 
-	# 	train_loss = train_loss / (num_batches)
+		train_loss = train_loss / (num_batches)
 
-	# 	train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
-	# 	dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
+		train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
+		dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
 
-	# 	if dev_acc > best_dev_acc:
-	# 		best_dev_acc = dev_acc
-	save_mixout_model(model, optimizer, args, config, args.filepath)
+		if dev_acc > best_dev_acc:
+			best_dev_acc = dev_acc
+			save_mixout_model(model, optimizer, args, config, args.filepath)
 
-	# print(f"Mixout epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+		print(f"Mixout epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 
 
